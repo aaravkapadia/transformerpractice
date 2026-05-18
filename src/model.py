@@ -54,10 +54,14 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         # each token directly reads off logits for the next token in from a look up table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.positional_embedding_table = nn.Embedding(block_size, n_embd)
         self.l_head = nn.Linear(n_embd, vocab_size) #intermediate linear layer
         
     def forward(self, idx, targets=None):
+        B, T = idx.shape
         token_embeddings = self.token_embedding_table(idx) #(B, T, C); C = embd size
+        pos_embd = self.positional_embedding_table(torch.arange(T,device=device))
+        x = token_embeddings+pos_embd
         logits = self.l_head(token_embeddings) #(B,T,vocab_size)
         if targets is None:
             loss = None
