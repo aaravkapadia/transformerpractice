@@ -5,9 +5,9 @@ from torch.nn import functional as F
 #hyperparameters
 batch_size = 32
 block_size = 8
-max_iters = 3000
+max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-2
+learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
@@ -30,8 +30,8 @@ test = data[n:]
 def get_batch(split):
     data = train if split == 'train' else test
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack(data[i:i+block_size] for i in ix)
-    y = torch.stack(data[i+1:i+1+block_size] for i in ix)
+    x = torch.stack([data[i:i+block_size] for i in ix])
+    y = torch.stack([data[i+1:i+1+block_size] for i in ix])
     x,y = x.to(device), y.to(device)
     return x,y
 
@@ -45,7 +45,7 @@ def estimate_loss():
             X, Y = get_batch(split)
             logits, loss = model(X,Y)
             losses[k] = loss.item()
-        out[split] = losses.mean
+        out[split] = losses.mean()
     model.train()
     return out
 
@@ -69,7 +69,45 @@ class Head(nn.Module):
         out = wei @ v
         return out
 
-
+class MultiHeadAttention(nn.Module):
+    
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+        
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim = -1)
+        out = self.proj(out)
+        return out
+    
+class FeedForward(nn.Module):
+    
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd) #projection layer for residual
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+    
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffn = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+        
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+    
 class BigramLanguageModel(nn.Module):
     
     def __init__(self):
@@ -77,6 +115,11 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off logits for the next token in from a look up table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.positional_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4)
+        )
         self.l_head = nn.Linear(n_embd, vocab_size) #intermediate linear layer
         
     def forward(self, idx, targets=None):
@@ -84,7 +127,9 @@ class BigramLanguageModel(nn.Module):
         token_embeddings = self.token_embedding_table(idx) #(B, T, C); C = embd size
         pos_embd = self.positional_embedding_table(torch.arange(T,device=device))
         x = token_embeddings+pos_embd
-        logits = self.l_head(token_embeddings) #(B,T,vocab_size)
+        x = self.blocks(x)
+        logits = self.l_head(x) #(B,T,vocab_size)
+        
         if targets is None:
             loss = None
         else: 
@@ -96,7 +141,8 @@ class BigramLanguageModel(nn.Module):
     
     def generate(self, idx, max_new_tokens): #idx = (Batch, Time) array of indices in the current context
         for _ in range(max_new_tokens):
-            logits, loss = self(idx) #predictions
+            idx_cond = idx[:, -block_size:]
+            logits, loss = self(idx_cond) #predictions
             logits = logits[:, -1, :] #(Batch, Channel)
             probs = F.softmax(logits, dim = 1)
             idx_next = torch.multinomial(probs, num_samples=1) #sample from distribution, (B, 1)
@@ -109,14 +155,15 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 for iter in range(max_iters):
     if iter % eval_interval == 0:
         losses = estimate_loss()
+        print(f"loss: {losses['train']:.4f}, val loss {losses['test']:.4f}")
     xb, yb = get_batch('train')
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
-context = torch.zeros((1,1), dtype=torch.long, device = device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+# context = torch.zeros((1,1), dtype=torch.long, device = device)
+# print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
         
             
             
